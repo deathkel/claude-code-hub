@@ -11,6 +11,7 @@ import { logger } from "@/lib/logger";
  *   段错误窗口
  * - cancel() 在调用 destroy() 之前先 detach 监听器，再检查 destroyed 防止
  *   重复 destroy
+ * - Node 流 error 后主动 destroy，避免暂停的上游响应体和 socket 继续保留缓冲
  */
 export function nodeStreamToWebStreamSafe(
   nodeStream: Readable,
@@ -120,6 +121,23 @@ export function nodeStreamToWebStreamSafe(
             errorName: err.name,
           });
           detach(nodeStream);
+
+          // The Web stream is already being failed with the original error. Destroy
+          // without forwarding the same error again, while guarding asynchronous
+          // _destroy callbacks that may still emit error/close later.
+          if (nodeStream.destroyed) {
+            if (!nodeStream.closed) {
+              installPendingDestroyErrorGuard(nodeStream);
+            }
+          } else {
+            installPendingDestroyErrorGuard(nodeStream);
+            try {
+              nodeStream.destroy();
+            } catch {
+              // ignore
+            }
+          }
+
           try {
             controller.error(err);
           } catch {

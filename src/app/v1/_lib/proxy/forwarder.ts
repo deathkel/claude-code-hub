@@ -8307,6 +8307,15 @@ export class ProxyForwarder {
         error: err.message,
         errorCode: code,
       });
+      // This listener is installed before the Node-to-Web adapter. Close the
+      // response body even if an error arrives in that narrow setup window.
+      if (!rawBody.destroyed) {
+        try {
+          rawBody.destroy();
+        } catch {
+          // ignore
+        }
+      }
     });
 
     // 构建响应头

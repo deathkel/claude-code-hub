@@ -173,7 +173,7 @@ describe("nodeStreamToWebStreamSafe", () => {
     expect(node.listenerCount("error")).toBe(0);
   });
 
-  it("propagates source errors as a stream error to the reader", async () => {
+  it("propagates source errors and destroys the source exactly once", async () => {
     // Pause the readable so we have time to emit error after attaching listeners
     const node = new Readable({
       read() {
@@ -183,16 +183,93 @@ describe("nodeStreamToWebStreamSafe", () => {
 
     const web = nodeStreamToWebStreamSafe(node, 1, "test");
     const reader = web.getReader();
+    const destroySpy = vi.spyOn(node, "destroy");
 
     const boom = new Error("boom");
     queueMicrotask(() => node.emit("error", boom));
 
-    await expect(reader.read()).rejects.toThrow("boom");
+    await expect(reader.read()).rejects.toBe(boom);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(destroySpy).toHaveBeenCalledTimes(1);
+    expect(node.destroyed).toBe(true);
     // After error settles, listeners must be detached
     expect(node.listenerCount("data")).toBe(0);
     expect(node.listenerCount("end")).toBe(0);
     expect(node.listenerCount("close")).toBe(0);
     expect(node.listenerCount("error")).toBe(0);
+  });
+
+  it("guards an asynchronous destroy error after the source has already failed", async () => {
+    const lateDestroyError = new Error("late-destroy-after-upstream-error");
+    const node = new Readable({
+      read() {
+        // no-op
+      },
+      destroy(_error, callback) {
+        setTimeout(() => callback(lateDestroyError), 30);
+      },
+    });
+    const destroySpy = vi.spyOn(node, "destroy");
+    const uncaughtSpy = vi.fn();
+    process.once("uncaughtException", uncaughtSpy);
+
+    const web = nodeStreamToWebStreamSafe(node, 1, "test");
+    const reader = web.getReader();
+    const upstreamError = new Error("upstream-failed");
+    queueMicrotask(() => node.emit("error", upstreamError));
+
+    await expect(reader.read()).rejects.toBe(upstreamError);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    process.removeListener("uncaughtException", uncaughtSpy);
+    expect(destroySpy).toHaveBeenCalledTimes(1);
+    expect(uncaughtSpy).not.toHaveBeenCalled();
+    expect(node.destroyed).toBe(true);
+    expect(node.listenerCount("error")).toBe(0);
+    expect(node.listenerCount("close")).toBe(0);
+  });
+
+  it("destroys every buffered source during a concurrent upstream error storm", async () => {
+    const sourceCount = 128;
+    const sources = Array.from(
+      { length: sourceCount },
+      () =>
+        new Readable({
+          read() {
+            // chunks and failures are injected below
+          },
+        })
+    );
+    const readers = sources.map((source, index) =>
+      nodeStreamToWebStreamSafe(source, index + 1, `provider-${index + 1}`).getReader()
+    );
+    const firstReads = readers.map((reader) => reader.read());
+
+    sources.forEach((source, index) => {
+      source.emit("data", Buffer.alloc(128 * 1024, index));
+      source.emit("error", new Error(`upstream-failed-${index}`));
+    });
+
+    const firstResults = await Promise.all(firstReads);
+    expect(
+      firstResults.every((result) => !result.done && result.value?.byteLength === 128 * 1024)
+    ).toBe(true);
+
+    const terminalResults = await Promise.allSettled(readers.map((reader) => reader.read()));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(terminalResults.every((result) => result.status === "rejected")).toBe(true);
+    expect(sources.every((source) => source.destroyed)).toBe(true);
+    expect(
+      sources.every(
+        (source) =>
+          source.listenerCount("data") === 0 &&
+          source.listenerCount("end") === 0 &&
+          source.listenerCount("close") === 0 &&
+          source.listenerCount("error") === 0
+      )
+    ).toBe(true);
   });
 
   it("rejects when the source closes after conversion without reaching EOF", async () => {
