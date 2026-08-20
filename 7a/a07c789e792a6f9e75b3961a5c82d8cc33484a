@@ -1,0 +1,23 @@
+src/app/v1/_lib/proxy/forwarder.ts
+  s_2009e83dc2f99b::t_1d455cd0fddad8 8310-8318
+src/app/v1/_lib/proxy/node-stream-to-web.test.ts
+  s_2009e83dc2f99b::t_a58cd322056f06 176,186,191-195,203-274
+src/app/v1/_lib/proxy/node-stream-to-web.ts
+  s_2009e83dc2f99b::t_9a65e46bf7a555 14,124-140
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "7aa07c789e792a6f9e75b3961a5c82d8cc33484a",
+  "prompts": {},
+  "sessions": {
+    "s_2009e83dc2f99b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019fdbe0-8c17-7331-a0e9-ffa09247ead0",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "吴嘉烽 <wujiafeng@example.com>"
+    }
+  }
+}
