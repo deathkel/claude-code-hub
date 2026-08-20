@@ -110,7 +110,7 @@ import { ProxyProviderResolver } from "./provider-selector";
 import { abortReplayOwnership, releaseReplayOwnership } from "./replay/replay-spool";
 import { isJsonResponseContentType, isMalformedJsonResponseBody } from "./response-content-type";
 import { finalizeHedgeLoserBilling, hasStreamCompletionMarker } from "./response-handler";
-import type { ProxySession } from "./session";
+import { type ProxySession, truncateRequestBodyLog } from "./session";
 import {
   type DeferredStreamingHedgeBindingAuthority,
   setDeferredStreamingFinalization,
@@ -141,6 +141,20 @@ import {
   type ThinkingSignatureRectifierResult,
   type ThinkingSignatureRectifierTrigger,
 } from "./thinking-signature-rectifier";
+
+export function summarizeForwardedRequestBody(session: ProxySession, value: string): string {
+  return session.isHighConcurrencyModeEnabled() ? truncateRequestBodyLog(value) : value;
+}
+
+export function getRequestBodySize(body: BodyInit | undefined): number {
+  if (body === undefined || body === null) return 0;
+  if (typeof body === "string") return Buffer.byteLength(body);
+  if (body instanceof ArrayBuffer) return body.byteLength;
+  if (ArrayBuffer.isView(body)) return body.byteLength;
+  if (body instanceof Blob) return body.size;
+  if (body instanceof URLSearchParams) return Buffer.byteLength(body.toString());
+  return 0;
+}
 
 /** Default User-Agent for Codex CLI requests when none is provided */
 export const DEFAULT_CODEX_USER_AGENT =
@@ -2934,7 +2948,7 @@ export class ProxyForwarder {
 
         const bodyString = JSON.stringify(bodyToSerialize);
         requestBody = bodyString;
-        session.forwardedRequestBody = bodyString;
+        session.forwardedRequestBody = summarizeForwardedRequestBody(session, bodyString);
       } else {
         // No body: still need streaming detection, auth, URL, headers
         const geminiPathname = session.requestUrl.pathname || "";
@@ -3231,7 +3245,10 @@ export class ProxyForwarder {
         ) {
           // Raw passthrough: preserve original request body bytes as-is
           requestBody = session.request.buffer;
-          session.forwardedRequestBody = session.request.log;
+          session.forwardedRequestBody = summarizeForwardedRequestBody(
+            session,
+            session.request.log
+          );
 
           try {
             isStreaming = (session.request.message as Record<string, unknown>).stream === true;
@@ -3334,7 +3351,7 @@ export class ProxyForwarder {
 
           const bodyString = JSON.stringify(messageToSend);
           requestBody = bodyString;
-          session.forwardedRequestBody = bodyString;
+          session.forwardedRequestBody = summarizeForwardedRequestBody(session, bodyString);
           isStreaming = messageToSend.stream === true;
 
           if (process.env.NODE_ENV === "development") {
@@ -4068,7 +4085,11 @@ export class ProxyForwarder {
             // 请求上下文
             method: session.method,
             hasBody: !!requestBody,
-            bodySize: requestBody ? JSON.stringify(requestBody).length : 0,
+            bodySize: session.isHighConcurrencyModeEnabled()
+              ? getRequestBodySize(requestBody)
+              : requestBody
+                ? JSON.stringify(requestBody).length
+                : 0,
           });
 
           cleanupCombinedSignal();
@@ -4107,7 +4128,11 @@ export class ProxyForwarder {
           // 请求上下文
           method: session.method,
           hasBody: !!requestBody,
-          bodySize: requestBody ? JSON.stringify(requestBody).length : 0,
+          bodySize: session.isHighConcurrencyModeEnabled()
+            ? getRequestBodySize(requestBody)
+            : requestBody
+              ? JSON.stringify(requestBody).length
+              : 0,
         });
 
         cleanupCombinedSignal();

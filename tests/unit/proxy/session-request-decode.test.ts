@@ -10,7 +10,7 @@ vi.mock("@/repository/system-config", () => ({
   getSystemSettings: vi.fn(),
 }));
 
-import { ProxySession } from "@/app/v1/_lib/proxy/session";
+import { ProxySession, REQUEST_BODY_LOG_MAX_CHARS } from "@/app/v1/_lib/proxy/session";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -45,6 +45,35 @@ function makeContext(
 }
 
 describe("ProxySession.fromContext request body decompression", () => {
+  it("does not retain the ordinary JSON buffer in high-concurrency mode", async () => {
+    const payload = JSON.stringify({ model: "gpt-5-codex", input: "plain" });
+    const ctx = makeContext(
+      "https://hub.test/v1/responses",
+      { "content-type": "application/json" },
+      encoder.encode(payload)
+    );
+
+    const session = await ProxySession.fromContext(ctx, { highConcurrencyModeEnabled: true });
+
+    expect(session.request.message.model).toBe("gpt-5-codex");
+    expect(session.request.buffer).toBeUndefined();
+    expect(ctx.req.raw.bodyUsed).toBe(true);
+  });
+
+  it("keeps the ordinary JSON buffer and clone behavior outside high-concurrency mode", async () => {
+    const payload = JSON.stringify({ model: "gpt-5-codex", input: "plain" });
+    const ctx = makeContext(
+      "https://hub.test/v1/responses",
+      { "content-type": "application/json" },
+      encoder.encode(payload)
+    );
+
+    const session = await ProxySession.fromContext(ctx);
+
+    expect(decoder.decode(session.request.buffer)).toBe(payload);
+    expect(ctx.req.raw.bodyUsed).toBe(false);
+  });
+
   it("decompresses a zstd codex /v1/responses body and strips content-encoding", async () => {
     const payload = JSON.stringify({
       model: "gpt-5-codex",
@@ -85,6 +114,24 @@ describe("ProxySession.fromContext request body decompression", () => {
     expect(session.headers.get("content-encoding")).toBeNull();
   });
 
+  it.each([
+    ["zstd", (payload: string) => zstdCompressSync(encoder.encode(payload))],
+    ["gzip", (payload: string) => gzipSync(encoder.encode(payload))],
+  ])("does not retain a decoded %s buffer in high-concurrency mode", async (encoding, encode) => {
+    const payload = JSON.stringify({ model: "gpt-5-codex", input: "compressed" });
+    const ctx = makeContext(
+      "https://hub.test/v1/responses",
+      { "content-type": "application/json", "content-encoding": encoding },
+      encode(payload)
+    );
+
+    const session = await ProxySession.fromContext(ctx, { highConcurrencyModeEnabled: true });
+
+    expect(session.request.message.input).toBe("compressed");
+    expect(session.request.buffer).toBeUndefined();
+    expect(session.headers.get("content-encoding")).toBeNull();
+  });
+
   it("decompresses for the raw-passthrough /v1/responses/compact endpoint", async () => {
     const payload = JSON.stringify({ model: "gpt-5-codex", input: "compact me" });
     const ctx = makeContext(
@@ -98,6 +145,60 @@ describe("ProxySession.fromContext request body decompression", () => {
     // Raw passthrough forwards session.request.buffer verbatim -> must be plaintext.
     expect(decoder.decode(session.request.buffer)).toBe(payload);
     expect(session.headers.get("content-encoding")).toBeNull();
+  });
+
+  it.each(["/v1/responses/compact", "/v1/messages/count_tokens"])(
+    "retains the decoded raw-passthrough buffer for %s in high-concurrency mode",
+    async (pathname) => {
+      const payload = JSON.stringify({ model: "gpt-5-codex", input: "raw" });
+      const ctx = makeContext(
+        `https://hub.test${pathname}`,
+        { "content-type": "application/json", "content-encoding": "gzip" },
+        gzipSync(encoder.encode(payload))
+      );
+
+      const session = await ProxySession.fromContext(ctx, { highConcurrencyModeEnabled: true });
+
+      expect(decoder.decode(session.request.buffer)).toBe(payload);
+    }
+  );
+
+  it("bounds valid and invalid request logs only in high-concurrency mode", async () => {
+    const largeValue = "x".repeat(REQUEST_BODY_LOG_MAX_CHARS + 4096);
+    const validPayload = JSON.stringify({ model: "gpt-5-codex", input: largeValue });
+    const invalidPayload = `${largeValue}:not-json`;
+
+    const highValid = await ProxySession.fromContext(
+      makeContext(
+        "https://hub.test/v1/responses",
+        { "content-type": "application/json" },
+        validPayload
+      ),
+      { highConcurrencyModeEnabled: true }
+    );
+    const highInvalid = await ProxySession.fromContext(
+      makeContext(
+        "https://hub.test/v1/responses",
+        { "content-type": "application/json" },
+        invalidPayload
+      ),
+      { highConcurrencyModeEnabled: true }
+    );
+    const normal = await ProxySession.fromContext(
+      makeContext(
+        "https://hub.test/v1/responses",
+        { "content-type": "application/json" },
+        validPayload
+      )
+    );
+
+    expect(highValid.request.log).toContain("[request_body_log_truncated]");
+    expect(highInvalid.request.log).toContain("[request_body_log_truncated]");
+    expect(highValid.request.log.length).toBeLessThanOrEqual(
+      REQUEST_BODY_LOG_MAX_CHARS + "\n[request_body_log_truncated]\n".length
+    );
+    expect(normal.request.log).not.toContain("[request_body_log_truncated]");
+    expect(normal.request.log.length).toBeGreaterThan(REQUEST_BODY_LOG_MAX_CHARS);
   });
 
   it("leaves uncompressed requests untouched", async () => {

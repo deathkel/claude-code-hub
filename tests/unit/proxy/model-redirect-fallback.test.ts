@@ -282,4 +282,18 @@ describe("Model redirect across provider fallback", () => {
     // Original is preserved across both attempts (used for billing).
     expect(session.getOriginalModel()).toBe(REQUESTED_MODEL);
   });
+
+  test("high-concurrency mode does not rebuild an ordinary request buffer", () => {
+    const provider = createProvider({
+      modelRedirects: [
+        { matchType: "exact", source: REQUESTED_MODEL, target: PROVIDER_A_REDIRECT },
+      ],
+    });
+    const session = createSession(REQUESTED_MODEL);
+    session.setHighConcurrencyModeEnabled(true);
+
+    expect(ModelRedirector.apply(session, provider)).toBe(true);
+    expect(session.request.message.model).toBe(PROVIDER_A_REDIRECT);
+    expect(session.request.buffer).toBeUndefined();
+  });
 });

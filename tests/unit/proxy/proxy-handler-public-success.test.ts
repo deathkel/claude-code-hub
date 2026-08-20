@@ -136,6 +136,29 @@ describe("handleProxyRequest public success behavior", () => {
     expect(boundary.send).toHaveBeenCalledOnce();
   });
 
+  it("applies high-concurrency request memory policy before session parsing", async () => {
+    boundary.loadSettings.mockResolvedValue({
+      ...defaultSettings,
+      enableHighConcurrencyMode: true,
+    });
+    boundary.send.mockResolvedValue(
+      new Response(JSON.stringify({ id: "msg_hc", type: "message", content: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    );
+
+    await handleProxyRequest(
+      createContext("/v1/messages", {
+        model: "claude-sonnet-4-5",
+        messages: [{ role: "user", content: "hello" }],
+      })
+    );
+
+    expect(observedSession?.isHighConcurrencyModeEnabled()).toBe(true);
+    expect(observedSession?.request.buffer).toBeUndefined();
+  });
+
   it("returns synthesized SSE when the request is fake-stream eligible", async () => {
     boundary.loadSettings.mockResolvedValue({
       ...defaultSettings,

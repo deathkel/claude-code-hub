@@ -123,10 +123,15 @@ export class ModelRedirector {
       // 更新缓存的 model 字段
       session.request.model = redirectedModel;
 
-      // 重新生成请求 buffer（使用 TextEncoder）
-      const updatedBody = JSON.stringify(session.request.message);
-      const encoder = new TextEncoder();
-      session.request.buffer = encoder.encode(updatedBody).buffer;
+      if (
+        !session.isHighConcurrencyModeEnabled() ||
+        session.getEndpointPolicy().bypassForwarderPreprocessing
+      ) {
+        const updatedBody = JSON.stringify(session.request.message);
+        session.request.buffer = new TextEncoder().encode(updatedBody).buffer;
+      } else {
+        session.request.buffer = undefined;
+      }
     }
 
     // 更新日志（记录重定向）
@@ -222,9 +227,15 @@ export class ModelRedirector {
     }
 
     // 重新生成请求 buffer
-    if (!isOpenAIImageMultipartRequest(imageRequestMetadata)) {
+    if (
+      !isOpenAIImageMultipartRequest(imageRequestMetadata) &&
+      (!session.isHighConcurrencyModeEnabled() ||
+        session.getEndpointPolicy().bypassForwarderPreprocessing)
+    ) {
       const updatedBody = JSON.stringify(session.request.message);
       session.request.buffer = new TextEncoder().encode(updatedBody).buffer;
+    } else if (!isOpenAIImageMultipartRequest(imageRequestMetadata)) {
+      session.request.buffer = undefined;
     }
 
     logger.info("[ModelRedirector] Reset model to original (provider switch)", {

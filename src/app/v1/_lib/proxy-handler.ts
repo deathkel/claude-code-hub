@@ -52,15 +52,8 @@ export async function handleProxyRequest(c: Context): Promise<Response> {
     return identity.identity;
   };
   try {
-    session = await ProxySession.fromContext(c);
     try {
       cachedSystemSettings = await getCachedSystemSettings();
-      session.setHighConcurrencyModeEnabled(
-        cachedSystemSettings.enableHighConcurrencyMode ?? false
-      );
-      session.setRawCrossProviderFallbackEnabled(
-        cachedSystemSettings.allowNonConversationEndpointProviderFallback ?? true
-      );
     } catch (settingsError) {
       const databaseError = findSafeDatabaseError(settingsError);
       logger.warn(
@@ -72,9 +65,15 @@ export async function handleProxyRequest(c: Context): Promise<Response> {
           databaseCode: databaseError?.code,
         }
       );
-      session.setHighConcurrencyModeEnabled(false);
-      session.setRawCrossProviderFallbackEnabled(false);
     }
+    const highConcurrencyModeEnabled = cachedSystemSettings?.enableHighConcurrencyMode ?? false;
+    session = await ProxySession.fromContext(c, { highConcurrencyModeEnabled });
+    session.setHighConcurrencyModeEnabled(highConcurrencyModeEnabled);
+    session.setRawCrossProviderFallbackEnabled(
+      cachedSystemSettings
+        ? (cachedSystemSettings.allowNonConversationEndpointProviderFallback ?? true)
+        : false
+    );
 
     // 自动检测请求格式（端点优先，请求体补充）
     if (session.originalFormat === "claude") {

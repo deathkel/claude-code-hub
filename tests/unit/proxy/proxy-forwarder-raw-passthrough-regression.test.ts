@@ -28,7 +28,7 @@ vi.mock("@/lib/proxy-agent", () => ({
 }));
 
 import { resolveEndpointPolicy } from "@/app/v1/_lib/proxy/endpoint-policy";
-import { ProxyForwarder } from "@/app/v1/_lib/proxy/forwarder";
+import { getRequestBodySize, ProxyForwarder } from "@/app/v1/_lib/proxy/forwarder";
 import { rectifyResponseInput } from "@/app/v1/_lib/proxy/response-input-rectifier";
 import { ProxySession } from "@/app/v1/_lib/proxy/session";
 import type { Provider } from "@/types/provider";
@@ -256,5 +256,41 @@ describe("ProxyForwarder raw passthrough regression", () => {
 
     expect(capturedHeaders?.get("connection")).toBeNull();
     expect(capturedHeaders?.get("transfer-encoding")).toBeNull();
+  });
+
+  it("high-concurrency mode truncates only the raw-passthrough audit copy", async () => {
+    const body = JSON.stringify({ model: "gpt-5.5", input: "x".repeat(300 * 1024) });
+    const session = createRawPassthroughSession(body);
+    session.setHighConcurrencyModeEnabled(true);
+    const provider = createProvider();
+
+    let capturedBody: BodyInit | undefined;
+    vi.spyOn(ProxyForwarder as any, "fetchWithoutAutoDecode").mockImplementationOnce(
+      async (_url: string, init: RequestInit) => {
+        capturedBody = init.body ?? undefined;
+        return new Response("{}", {
+          status: 200,
+          headers: { "content-type": "application/json", "content-length": "2" },
+        });
+      }
+    );
+
+    const { doForward } = ProxyForwarder as unknown as {
+      doForward: (session: ProxySession, provider: Provider, baseUrl: string) => Promise<Response>;
+    };
+    await doForward(session, provider, provider.url);
+
+    expect(readBodyText(capturedBody)).toBe(body);
+    expect(session.forwardedRequestBody).toContain("[request_body_log_truncated]");
+    expect(session.forwardedRequestBody?.length).toBeLessThan(body.length);
+  });
+
+  it("calculates request body bytes without serializing the body", () => {
+    expect(getRequestBodySize("hello")).toBe(5);
+    expect(getRequestBodySize(new Uint8Array(7))).toBe(7);
+    expect(getRequestBodySize(new ArrayBuffer(11))).toBe(11);
+    expect(getRequestBodySize(new Blob(["hello"]))).toBe(5);
+    expect(getRequestBodySize(new URLSearchParams({ q: "a b" }))).toBe(5);
+    expect(getRequestBodySize(undefined)).toBe(0);
   });
 });

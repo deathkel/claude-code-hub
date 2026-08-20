@@ -78,4 +78,26 @@ describe("ProxySession - openai image multipart parsing", () => {
       ProxySession
     );
   });
+
+  it("retains multipart wire bytes in high-concurrency mode", async () => {
+    const request = createMultipartRequest({
+      pathname: "/v1/images/edits",
+      fields: [
+        ["model", "gpt-image-1.5"],
+        ["prompt", "edit this"],
+      ],
+      fileSize: 32,
+    });
+
+    const session = await ProxySession.fromContext(createContext(request), {
+      highConcurrencyModeEnabled: true,
+    });
+
+    expect(session.request.buffer?.byteLength).toBeGreaterThan(0);
+    expect(session.isOpenAIImageMultipartRequest()).toBe(true);
+    expect(session.request.message).toEqual({
+      model: "gpt-image-1.5",
+      prompt: "edit this",
+    });
+  });
 });

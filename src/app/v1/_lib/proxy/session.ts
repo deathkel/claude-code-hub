@@ -120,6 +120,10 @@ export interface ProxyRequestPayload {
   imageRequestMetadata?: OpenAIImageRequestMetadata | null;
 }
 
+export interface ProxySessionCreateOptions {
+  highConcurrencyModeEnabled?: boolean;
+}
+
 interface RequestBodyResult {
   requestMessage: Record<string, unknown>;
   requestBodyLog: string;
@@ -298,6 +302,7 @@ export class ProxySession {
     userAgent: string | null;
     context: Context;
     clientAbortSignal: AbortSignal | null;
+    highConcurrencyModeEnabled: boolean;
   }) {
     this.startTime = init.startTime;
     this.method = init.method;
@@ -309,6 +314,7 @@ export class ProxySession {
     this.userAgent = init.userAgent;
     this.context = init.context;
     this.clientAbortSignal = init.clientAbortSignal;
+    this.highConcurrencyModeEnabled = init.highConcurrencyModeEnabled;
     this.userName = "unknown";
     this.authState = null;
     this.provider = null;
@@ -319,13 +325,17 @@ export class ProxySession {
     this.endpointPolicy = resolveEndpointPolicy(this.managedEndpoint);
   }
 
-  static async fromContext(c: Context): Promise<ProxySession> {
+  static async fromContext(
+    c: Context,
+    options: ProxySessionCreateOptions = {}
+  ): Promise<ProxySession> {
     const startTime = Date.now();
     const method = c.req.method.toUpperCase();
     const requestUrl = new URL(c.req.url);
     const headers = new Headers(c.req.header());
     const headerLog = formatHeadersForLog(headers);
-    const bodyResult = await parseRequestBody(c);
+    const highConcurrencyModeEnabled = options.highConcurrencyModeEnabled ?? false;
+    const bodyResult = await parseRequestBody(c, highConcurrencyModeEnabled);
 
     // 已在代理内解压请求体：剥离 content-encoding，避免上游对明文再次解码
     // （raw passthrough 也会转发解压后的字节；content-length 由出站黑名单重算）。
@@ -398,6 +408,7 @@ export class ProxySession {
       userAgent,
       context: c,
       clientAbortSignal,
+      highConcurrencyModeEnabled,
     });
   }
 
@@ -1212,8 +1223,15 @@ export class ProxySession {
       throw new ProxyError(message, 400);
     }
 
-    this.request.buffer = new TextEncoder().encode(serialized).buffer;
-    this.request.log = JSON.stringify(optimizeRequestMessage(this.request.message), null, 2);
+    if (!this.highConcurrencyModeEnabled || this.endpointPolicy.bypassForwarderPreprocessing) {
+      this.request.buffer = new TextEncoder().encode(serialized).buffer;
+    } else {
+      this.request.buffer = undefined;
+    }
+    const requestBodyLog = JSON.stringify(optimizeRequestMessage(this.request.message), null, 2);
+    this.request.log = this.highConcurrencyModeEnabled
+      ? truncateRequestBodyLog(requestBodyLog)
+      : requestBodyLog;
   }
 
   /**
@@ -1630,6 +1648,19 @@ export function extractModelFromPath(pathname: string): string | null {
  * Related config: next.config.ts proxyClientMaxBodySize (100MB)
  */
 const LARGE_REQUEST_BODY_BYTES = 10 * 1024 * 1024;
+export const REQUEST_BODY_LOG_MAX_CHARS = 256 * 1024;
+const REQUEST_BODY_LOG_EDGE_CHARS = 128 * 1024;
+const REQUEST_BODY_LOG_TRUNCATED_MARKER = "[request_body_log_truncated]";
+
+export function truncateRequestBodyLog(value: string): string {
+  if (value.length <= REQUEST_BODY_LOG_MAX_CHARS) {
+    return value;
+  }
+
+  return `${value.slice(0, REQUEST_BODY_LOG_EDGE_CHARS)}\n${REQUEST_BODY_LOG_TRUNCATED_MARKER}\n${value.slice(
+    -REQUEST_BODY_LOG_EDGE_CHARS
+  )}`;
+}
 
 function parseContentLengthHeader(value: string | undefined): number | null {
   if (!value) return null;
@@ -1638,7 +1669,10 @@ function parseContentLengthHeader(value: string | undefined): number | null {
   return parsed;
 }
 
-async function parseRequestBody(c: Context): Promise<RequestBodyResult> {
+async function parseRequestBody(
+  c: Context,
+  highConcurrencyModeEnabled: boolean
+): Promise<RequestBodyResult> {
   const method = c.req.method.toUpperCase();
   const hasBody = method !== "GET" && method !== "HEAD";
 
@@ -1651,7 +1685,9 @@ async function parseRequestBody(c: Context): Promise<RequestBodyResult> {
   const contentEncoding = c.req.header("content-encoding") ?? null;
   const pathname = new URL(c.req.url).pathname;
   // 原始（可能被压缩的）入站字节：用于截断检测与 multipart 透传。
-  const rawBodyBuffer = await c.req.raw.clone().arrayBuffer();
+  const rawBodyBuffer = highConcurrencyModeEnabled
+    ? await c.req.raw.arrayBuffer()
+    : await c.req.raw.clone().arrayBuffer();
   const receivedBodyBytes = rawBodyBuffer.byteLength;
 
   // Truncation detection: warn only when both conditions are met
@@ -1682,8 +1718,15 @@ async function parseRequestBody(c: Context): Promise<RequestBodyResult> {
   if (getOpenAIImageEndpoint(pathname) && isOpenAIImageMultipartContentType(contentType)) {
     // 图片 multipart 请求保留 sidecar metadata，并为过滤/敏感词提供文本字段视图。
     // multipart 请求体不会被 content-encoding 压缩，按原始字节透传。
+    const metadataRequest = highConcurrencyModeEnabled
+      ? new Request(c.req.raw.url, {
+          method: c.req.raw.method,
+          headers: c.req.raw.headers,
+          body: rawBodyBuffer,
+        })
+      : c.req.raw;
     imageRequestMetadata = await parseOpenAIImageMultipartMetadata(
-      c.req.raw,
+      metadataRequest,
       pathname,
       contentType
     );
@@ -1713,10 +1756,15 @@ async function parseRequestBody(c: Context): Promise<RequestBodyResult> {
   try {
     const parsedMessage = JSON.parse(requestBodyText) as Record<string, unknown>;
     requestMessage = parsedMessage; // 保留原始数据用于业务逻辑
-    requestBodyLog = JSON.stringify(optimizeRequestMessage(parsedMessage), null, 2); // 仅在日志中优化
+    const optimizedLog = JSON.stringify(optimizeRequestMessage(parsedMessage), null, 2);
+    requestBodyLog = highConcurrencyModeEnabled
+      ? truncateRequestBodyLog(optimizedLog)
+      : optimizedLog;
   } catch {
     requestMessage = { raw: requestBodyText };
-    requestBodyLog = requestBodyText;
+    requestBodyLog = highConcurrencyModeEnabled
+      ? truncateRequestBodyLog(requestBodyText)
+      : requestBodyText;
     requestBodyLogNote = "请求体不是合法 JSON，已记录原始文本。";
   }
 
@@ -1724,7 +1772,10 @@ async function parseRequestBody(c: Context): Promise<RequestBodyResult> {
     requestMessage,
     requestBodyLog,
     requestBodyLogNote,
-    requestBodyBuffer,
+    requestBodyBuffer:
+      !highConcurrencyModeEnabled || resolveEndpointPolicy(pathname).bypassForwarderPreprocessing
+        ? requestBodyBuffer
+        : undefined,
     contentLength,
     // 维持原语义：actualBodyBytes 表示「接收到的原始（线上）字节」，供
     // isLargeRequestBody 的截断提示判断使用，不受解压后体积影响。
